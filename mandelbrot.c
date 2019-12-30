@@ -3,6 +3,11 @@
 #include <mpi.h>
 #include "lib/libbmp.h"
 
+MPI_Datatype MPI_Compl;
+MPI_Datatype MPI_MandelOpts;
+MPI_Datatype MPI_Pixel;
+MPI_Datatype MPI_Payload;
+
 int MAX_ITER = 250;
 int width = 1920;
 int height = 1080;
@@ -82,27 +87,7 @@ void writePayload(bmp_img* img, Payload* payload, MandelOpts* opts) {
 	}
 }
 
-int main(int argc, char** argv) {
-	/* Setup options for our mandelbot */
-	Compl z;
-	z.re = -2.0;
-	z.im = 1.0;
-	MandelOpts opts;
-	opts.p_width = width;
-	opts.p_height = height;
-	opts.c_width = 3.0;
-	opts.c_height = 2.0;
-	opts.max_iterations = MAX_ITER;
-	opts.escape_radius = 4.0;
-	opts.startZ = z;
-	/* Init MPI */
-	int size, rank;
-	MPI_Init(&argc, &argv);
-	MPI_Comm_size(MPI_COMM_WORLD, &size);
-	/* Setup MPI types */
-
-	/* First Compl */
-	MPI_Datatype MPI_Compl;
+void setupTypes() {
 	{
 	int nblocks = 2;
 	int blocklengths[2] = {1, 1};
@@ -113,9 +98,6 @@ int main(int argc, char** argv) {
 	MPI_Type_create_struct(nblocks, blocklengths, offsets, types, &MPI_Compl);
 	MPI_Type_commit(&MPI_Compl);
 	}
-
-	/* Now for MandelOpts */
-	MPI_Datatype MPI_MandelOpts;
 	{
 	int nblocks = 3;
 	int blocklengths[3] = {3,3,1};
@@ -127,9 +109,6 @@ int main(int argc, char** argv) {
 	MPI_Type_create_struct(nblocks, blocklengths, offsets, types, &MPI_MandelOpts);
 	MPI_Type_commit(&MPI_MandelOpts);
 	}
-
-	/* Now for Pixel */
-	MPI_Datatype MPI_Pixel;
 	{
 	int nblocks = 1;
 	int blocklengths[1] = {3};
@@ -139,9 +118,6 @@ int main(int argc, char** argv) {
 	MPI_Type_create_struct(nblocks, blocklengths, offsets, types, &MPI_Pixel);
 	MPI_Type_commit(&MPI_Pixel);
 	}
-
-	/* Now for Payload */
-	MPI_Datatype MPI_Payload;
 	{
 	int nblocks = 2;
 	int blocklengths[2] = {1,width};
@@ -152,77 +128,92 @@ int main(int argc, char** argv) {
 	MPI_Type_create_struct(nblocks, blocklengths, offsets, types, &MPI_Payload);
 	MPI_Type_commit(&MPI_Payload);
 	}
+}
 
-	/* Get MPI rank */
+void computeMandelbrot(bmp_img* img, MandelOpts* opts) {
+	int size;
+	int targetThread;
+	MPI_Status status;
+	Payload payload;
+	MPI_Comm_size(MPI_COMM_WORLD, &size);
+	for(int currentRow = 0; currentRow < opts->p_height; currentRow++) {
+		if(currentRow  < size - 1) {
+			// Send the options
+			MPI_Send(opts, 1, MPI_MandelOpts, currentRow + 1, 0, MPI_COMM_WORLD);
+			/* We send out the initial work */
+			MPI_Send(&currentRow, 1, MPI_INT, currentRow + 1, 0, MPI_COMM_WORLD);
+		} else {
+			/* We listen for results and distribute work */
+			MPI_Recv(&payload, 1, MPI_Payload, MPI_ANY_SOURCE, 0, MPI_COMM_WORLD, &status);
+			MPI_Send(&currentRow, 1, MPI_INT, status.MPI_SOURCE, 0, MPI_COMM_WORLD);
+			writePayload(img, &payload, opts);
+		}
+	}
+	/* Now we have to collect last set of results and tell threads to finish */
+	int message = POISON_PILL;
+	for(int thread = 0; thread < size - 1; thread++) {
+		MPI_Recv(&payload, 1, MPI_Payload, MPI_ANY_SOURCE, 0, MPI_COMM_WORLD, &status);
+		MPI_Send(&message, 1, MPI_INT, status.MPI_SOURCE, 0, MPI_COMM_WORLD);
+		writePayload(img, &payload, opts);
+	}
+}
+
+void worker() {
+	MandelOpts opts;
+	MPI_Status status;
+	Payload payload;
+	int targetRow;
+	// Get the first options
+	MPI_Recv(&opts, 1, MPI_Payload, 0, 0, MPI_COMM_WORLD, &status);
+	// Get the first row
+	MPI_Recv(&targetRow, 1, MPI_INT, 0, 0, MPI_COMM_WORLD, &status);
+	do {
+		payload.row = targetRow;
+		computeRow(&opts, &payload);
+		MPI_Send(&payload, 1, MPI_Payload, 0, 0, MPI_COMM_WORLD);
+		MPI_Recv(&targetRow, 1, MPI_INT, 0, 0, MPI_COMM_WORLD, &status);
+		if(targetRow == AWAIT_OPTIONS) {
+			// Get the new options
+			MPI_Recv(&opts, 1, MPI_Payload, 0, 0, MPI_COMM_WORLD, &status);
+			// Get the first job on the new options
+			MPI_Recv(&targetRow, 1, MPI_INT, 0, 0, MPI_COMM_WORLD, &status);
+		}
+	} while ( targetRow != POISON_PILL );
+}
+
+int main(int argc, char** argv) {
+	/* Setup options for our mandelbot */
+	Compl z;
+	z.re = -2.5;
+	MandelOpts opts;
+	opts.p_width = width;
+	opts.p_height = height;
+	opts.c_width = 4.0;
+	opts.c_height = opts.c_width / width * height;
+	z.im = opts.c_height / 2.0;
+	opts.max_iterations = MAX_ITER;
+	opts.escape_radius = 4.0;
+	opts.startZ = z;
+
+	/* Init MPI */
+	int rank;
+	MPI_Init(&argc, &argv);
+	/* Setup MPI types */
+	setupTypes();
+	/* Get rank */
 	MPI_Comm_rank(MPI_COMM_WORLD, &rank);
-
-	/* Broadcast the context to our workers */
-	MPI_Bcast(&opts, 1, MPI_MandelOpts, 0, MPI_COMM_WORLD);
 
 	if (rank == 0) {
 		/* Open up the image file */
 		bmp_img img;
 		bmp_img_init_df(&img, width, height);
-		int targetThread;
-		MPI_Status status;
-		Payload payload;
-		int workloads[16];
-		for(int i = 0; i<16; i++) {
-			workloads[i] = 0;
-		}
-		/* Do the actual work */
-		for(int currentRow = 0; currentRow < opts.p_height; currentRow++) {
-			if(currentRow  < size - 1) {
-				/* We send out the initial work */
-				MPI_Send(&currentRow, 1, MPI_INT, currentRow + 1, 0, MPI_COMM_WORLD);
-			} else {
-				/* We listen for results and distribute work */
-				MPI_Recv(&payload, 1, MPI_Payload, MPI_ANY_SOURCE, 0, MPI_COMM_WORLD, &status);
-				MPI_Send(&currentRow, 1, MPI_INT, status.MPI_SOURCE, 0, MPI_COMM_WORLD);
-				writePayload(&img, &payload, &opts);
-				for(int i = 0; i < width; i++) {
-					workloads[status.MPI_SOURCE] += payload.iterations_arr[i];
-				}
-			}
-		}
-		/* Now we have to collect last set of results and tell threads to finish */
-		int message = POISON_PILL;
-		for(int thread = 0; thread < size - 1; thread++) {
-			MPI_Recv(&payload, 1, MPI_Payload, MPI_ANY_SOURCE, 0, MPI_COMM_WORLD, &status);
-			MPI_Send(&message, 1, MPI_INT, status.MPI_SOURCE, 0, MPI_COMM_WORLD);
-			writePayload(&img, &payload, &opts);
-			for(int i = 0; i < width; i++) {
-				workloads[status.MPI_SOURCE] += payload.iterations_arr[i];
-			}
-		}
-		for(int i = 0; i<16; i++) {
-			printf("%i\n", workloads[i]);
-		}
-		int total = 0;
-		for(int i = 0; i<16; i++) {
-			total += workloads[i];
-		}
-		printf("Total : %i\n", total);
+		/* Do work */
+		computeMandelbrot(&img, &opts);
 		/* Write to file */
 		bmp_img_write(&img, "file1.bmp");
 		bmp_img_free(&img);
 	} else {
-		MPI_Status status;
-		Payload payload;
-		int targetRow;
-		MPI_Recv(&targetRow, 1, MPI_INT, 0, 0, MPI_COMM_WORLD, &status);
-		do {
-			payload.row = targetRow;
-			computeRow(&opts, &payload);
-			MPI_Send(&payload, 1, MPI_Payload, 0, 0, MPI_COMM_WORLD);
-			MPI_Recv(&targetRow, 1, MPI_INT, 0, 0, MPI_COMM_WORLD, &status);
-			if(targetRow == AWAIT_OPTIONS) {
-				// Get the new options
-				MPI_Recv(&opts, 1, MPI_Payload, 0, 0, MPI_COMM_WORLD, &status);
-				// Get the first job on the new options
-				MPI_Recv(&targetRow, 1, MPI_INT, 0, 0, MPI_COMM_WORLD, &status);
-			}
-		} while ( targetRow != POISON_PILL );
+		worker();
 	}
 	/* Close MPI */
 	MPI_Finalize();
