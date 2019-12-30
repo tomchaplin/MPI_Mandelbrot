@@ -1,6 +1,11 @@
 #include <stdio.h>
 #include <math.h>
 #include <mpi.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#include <string.h>
+#include <time.h>
 #include "lib/libbmp.h"
 
 MPI_Datatype MPI_Compl;
@@ -117,7 +122,7 @@ void writePayload(bmp_img* img, Payload* payload, MandelOpts* opts) {
 	}
 }
 
-void computeMandelbrot(bmp_img* img, MandelOpts* opts) {
+void computeMandelbrot(bmp_img* img, MandelOpts* opts, int message) {
 	int size;
 	int targetThread;
 	MPI_Status status;
@@ -137,7 +142,6 @@ void computeMandelbrot(bmp_img* img, MandelOpts* opts) {
 		}
 	}
 	/* Now we have to collect last set of results and tell threads to finish */
-	int message = POISON_PILL;
 	for(int thread = 0; thread < size - 1; thread++) {
 		MPI_Recv(&payload, 1, MPI_Payload, MPI_ANY_SOURCE, 0, MPI_COMM_WORLD, &status);
 		MPI_Send(&message, 1, MPI_INT, status.MPI_SOURCE, 0, MPI_COMM_WORLD);
@@ -179,26 +183,64 @@ int main(int argc, char** argv) {
 
 	if (rank == 0) {
 		/* Setup options for our mandelbot */
-		Compl z;
-		z.re = -2.5;
 		MandelOpts opts;
 		opts.p_width = width;
 		opts.p_height = height;
-		opts.c_width = 4.0;
-		opts.c_height = opts.c_width / width * height;
-		z.im = opts.c_height / 2.0;
 		opts.max_iterations = MAX_ITER;
+		opts.c_width = 1.0;
 		opts.escape_radius = 4.0;
-		opts.startZ = z;
+		Compl centerZ;
+		centerZ.re = -1.2310203138415972;
+		centerZ.im = 0.1679294826373479;
+		double zoom_factor = 1.05;
+		int frames = 100;
+
+		/* Setup directory */
+		time_t rawtime;
+		struct tm * timeinfo;
+		time ( &rawtime );
+		timeinfo = localtime ( &rawtime );
+		char directory[128];
+		sprintf(directory,  "output/%d_%02d_%02d_%02d%02d%02d/",
+				timeinfo->tm_year + 1900,
+				timeinfo->tm_mon + 1,
+				timeinfo->tm_mday,
+				timeinfo->tm_hour,
+				timeinfo->tm_min,
+				timeinfo->tm_sec
+				);
+		struct stat st = {0};
+		if (stat(directory, &st) == -1) {
+			    mkdir(directory, 0700);
+		}
 
 		/* Open up the image file */
 		bmp_img img;
-		bmp_img_init_df(&img, width, height);
+		char filename[128];
 		/* Do work */
-		computeMandelbrot(&img, &opts);
-		/* Write to file */
-		bmp_img_write(&img, "file1.bmp");
-		bmp_img_free(&img);
+		for(int currentFrame = 0; currentFrame < frames; currentFrame++) {
+			bmp_img_init_df(&img, width, height);
+			// Figure out the options for this frame
+			opts.c_height = opts.c_width * ((double)opts.p_height / (double)opts.p_width);
+			opts.startZ = centerZ;
+			opts.startZ.re -= 0.5*opts.c_width;
+			opts.startZ.im += 0.5*opts.c_height;
+			// Work out the mandelbrot
+			int message = AWAIT_OPTIONS;
+			if(currentFrame == frames -1) {
+				message = POISON_PILL;
+			};
+			computeMandelbrot(&img, &opts, message);
+			// Figure out the filename
+			sprintf(filename, "%sfile%04d.bmp", directory, currentFrame);
+			/* Write to file */
+			bmp_img_write(&img, filename);
+			bmp_img_free(&img);
+			printf("Finished frame %04d\n", currentFrame);
+			fflush(stdout);
+			// Zooooom
+			opts.c_width = opts.c_width / zoom_factor;
+		}
 	} else {
 		worker();
 	}
