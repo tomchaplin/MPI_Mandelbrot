@@ -15,3 +15,11 @@ mprun -np <n_cores> --hostfile hostfile ./mandelbrot.exe
 where `<n_cores>` should be replaced by the number of available cores on the cluster.
 
 `mandelbrot-serial.exe` can be run as normal in order to compare multi-threaded perforamnce to serial performance.
+
+## Direction
+
+Over time I intend to add the features I previously developed in [Multithreaded_Mandelbrot](https://github.com/tomchaplin/Multithreaded_Mandelbrot) to this MPI implementation, namely:
+
+* Animation
+* Zooming
+* A variety of colouring algorithms
