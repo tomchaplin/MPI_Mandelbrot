@@ -39,6 +39,40 @@ typedef struct Payload
 	int iterations_arr[1920];
 } Payload;
 
+void setupTypes(void) {
+	{
+	int nblocks = 2;
+	int blocklengths[2] = {1, 1};
+	MPI_Datatype types[2] = {MPI_DOUBLE, MPI_DOUBLE};
+	MPI_Aint offsets[2];
+	offsets[0] = offsetof(Compl, re);
+	offsets[1] = offsetof(Compl, im);
+	MPI_Type_create_struct(nblocks, blocklengths, offsets, types, &MPI_Compl);
+	MPI_Type_commit(&MPI_Compl);
+	}
+	{
+	int nblocks = 3;
+	int blocklengths[3] = {3,3,1};
+	MPI_Datatype types[3] = {MPI_INT, MPI_DOUBLE, MPI_Compl};
+	MPI_Aint offsets[3];
+	offsets[0] = offsetof(MandelOpts, p_width);
+	offsets[1] = offsetof(MandelOpts, c_width);
+	offsets[2] = offsetof(MandelOpts, startZ);
+	MPI_Type_create_struct(nblocks, blocklengths, offsets, types, &MPI_MandelOpts);
+	MPI_Type_commit(&MPI_MandelOpts);
+	}
+	{
+	int nblocks = 2;
+	int blocklengths[2] = {1,width};
+	MPI_Datatype types[2] = {MPI_INT, MPI_INT};
+	MPI_Aint offsets[2];
+	offsets[0] = offsetof(Payload, row);
+	offsets[1] = offsetof(Payload, iterations_arr);
+	MPI_Type_create_struct(nblocks, blocklengths, offsets, types, &MPI_Payload);
+	MPI_Type_commit(&MPI_Payload);
+	}
+}
+
 int computePoint(Compl c, MandelOpts* opts) {
 	int iterations = 0;
 	Compl z;
@@ -82,41 +116,6 @@ void writePayload(bmp_img* img, Payload* payload, MandelOpts* opts) {
 				pixel.b);
 	}
 }
-
-void setupTypes(void) {
-	{
-	int nblocks = 2;
-	int blocklengths[2] = {1, 1};
-	MPI_Datatype types[2] = {MPI_DOUBLE, MPI_DOUBLE};
-	MPI_Aint offsets[2];
-	offsets[0] = offsetof(Compl, re);
-	offsets[1] = offsetof(Compl, im);
-	MPI_Type_create_struct(nblocks, blocklengths, offsets, types, &MPI_Compl);
-	MPI_Type_commit(&MPI_Compl);
-	}
-	{
-	int nblocks = 3;
-	int blocklengths[3] = {3,3,1};
-	MPI_Datatype types[3] = {MPI_INT, MPI_DOUBLE, MPI_Compl};
-	MPI_Aint offsets[3];
-	offsets[0] = offsetof(MandelOpts, p_width);
-	offsets[1] = offsetof(MandelOpts, c_width);
-	offsets[2] = offsetof(MandelOpts, startZ);
-	MPI_Type_create_struct(nblocks, blocklengths, offsets, types, &MPI_MandelOpts);
-	MPI_Type_commit(&MPI_MandelOpts);
-	}
-	{
-	int nblocks = 2;
-	int blocklengths[2] = {1,width};
-	MPI_Datatype types[2] = {MPI_INT, MPI_INT};
-	MPI_Aint offsets[2];
-	offsets[0] = offsetof(Payload, row);
-	offsets[1] = offsetof(Payload, iterations_arr);
-	MPI_Type_create_struct(nblocks, blocklengths, offsets, types, &MPI_Payload);
-	MPI_Type_commit(&MPI_Payload);
-	}
-}
-
 
 void computeMandelbrot(bmp_img* img, MandelOpts* opts) {
 	int size;
