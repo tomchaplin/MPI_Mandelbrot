@@ -70,10 +70,10 @@ void computeRow(MandelOpts* opts, Payload* load) {
 	}
 }
 
-void writePayload(bmp_img* img, Payload* payload) {
+void writePayload(bmp_img* img, Payload* payload, MandelOpts* opts) {
 	Pixel pixel;
 	for(int x = 0; x < width; x++) {
-		colourPixel(payload->iterations_arr[x], MAX_ITER, &pixel);
+		colourPixel(payload->iterations_arr[x], opts->max_iterations, &pixel);
 		bmp_pixel_init(
 				&img->img_pixels[payload->row][x], 
 				pixel.r,
@@ -179,7 +179,10 @@ int main(int argc, char** argv) {
 				/* We listen for results and distribute work */
 				MPI_Recv(&payload, 1, MPI_Payload, MPI_ANY_SOURCE, 0, MPI_COMM_WORLD, &status);
 				MPI_Send(&currentRow, 1, MPI_INT, status.MPI_SOURCE, 0, MPI_COMM_WORLD);
-				writePayload(&img, &payload);
+				writePayload(&img, &payload, &opts);
+				for(int i = 0; i < width; i++) {
+					workloads[status.MPI_SOURCE] += payload.iterations_arr[i];
+				}
 			}
 		}
 		/* Now we have to collect last set of results and tell threads to finish */
@@ -187,11 +190,19 @@ int main(int argc, char** argv) {
 		for(int thread = 0; thread < size - 1; thread++) {
 			MPI_Recv(&payload, 1, MPI_Payload, MPI_ANY_SOURCE, 0, MPI_COMM_WORLD, &status);
 			MPI_Send(&message, 1, MPI_INT, status.MPI_SOURCE, 0, MPI_COMM_WORLD);
-			writePayload(&img, &payload);
+			writePayload(&img, &payload, &opts);
+			for(int i = 0; i < width; i++) {
+				workloads[status.MPI_SOURCE] += payload.iterations_arr[i];
+			}
 		}
 		for(int i = 0; i<16; i++) {
 			printf("%i\n", workloads[i]);
 		}
+		int total = 0;
+		for(int i = 0; i<16; i++) {
+			total += workloads[i];
+		}
+		printf("Total : %i\n", total);
 		/* Write to file */
 		bmp_img_write(&img, "file1.bmp");
 		bmp_img_free(&img);
