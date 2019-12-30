@@ -5,20 +5,18 @@
 
 MPI_Datatype MPI_Compl;
 MPI_Datatype MPI_MandelOpts;
-MPI_Datatype MPI_Pixel;
 MPI_Datatype MPI_Payload;
 
 int MAX_ITER = 250;
 int width = 1920;
 int height = 1080;
-char filename[9] = "file1.bmp";
 
 const int AWAIT_OPTIONS = -2;
 const int POISON_PILL = -1;
 
 typedef struct Compl 
 {
-	float re, im;
+	double re, im;
 } Compl;
 
 typedef struct Pixel
@@ -30,8 +28,8 @@ typedef struct MandelOpts
 {
 	int p_width, p_height;
 	int max_iterations;
-	float c_width, c_height;
-	float escape_radius;
+	double c_width, c_height;
+	double escape_radius;
 	Compl startZ;
 } MandelOpts;
 
@@ -44,7 +42,7 @@ typedef struct Payload
 int computePoint(Compl c, MandelOpts* opts) {
 	int iterations = 0;
 	Compl z;
-	float z_length, temp;
+	double z_length, temp;
 	z.re = 0.0; z.im = 0.0;
 	do {
 		temp = z.re * z.re - z.im * z.im + c.re;
@@ -66,9 +64,7 @@ void colourPixel(int iterations, int max_iterations, Pixel* pixel) {
 void computeRow(MandelOpts* opts, Payload* load) {
 	Compl c = opts->startZ;
 	c.im = c.im - (load->row - 1) * opts->c_height / (opts->p_height -1);
-	float re_jump = opts->c_width / (opts->p_width - 1);
-	int pixelIter;
-	Pixel pixel;
+	double re_jump = opts->c_width / (opts->p_width - 1);
 	for(int x = 0; x < opts->p_width; x++) {
 		load->iterations_arr[x] = computePoint(c, opts);
 		c.re += re_jump;
@@ -87,7 +83,7 @@ void writePayload(bmp_img* img, Payload* payload, MandelOpts* opts) {
 	}
 }
 
-void setupTypes() {
+void setupTypes(void) {
 	{
 	int nblocks = 2;
 	int blocklengths[2] = {1, 1};
@@ -110,18 +106,9 @@ void setupTypes() {
 	MPI_Type_commit(&MPI_MandelOpts);
 	}
 	{
-	int nblocks = 1;
-	int blocklengths[1] = {3};
-	MPI_Datatype types[1] = {MPI_INT};
-	MPI_Aint offsets[1];
-	offsets[0] = offsetof(Pixel, r);
-	MPI_Type_create_struct(nblocks, blocklengths, offsets, types, &MPI_Pixel);
-	MPI_Type_commit(&MPI_Pixel);
-	}
-	{
 	int nblocks = 2;
 	int blocklengths[2] = {1,width};
-	MPI_Datatype types[3] = {MPI_INT, MPI_INT};
+	MPI_Datatype types[2] = {MPI_INT, MPI_INT};
 	MPI_Aint offsets[2];
 	offsets[0] = offsetof(Payload, row);
 	offsets[1] = offsetof(Payload, iterations_arr);
@@ -129,6 +116,7 @@ void setupTypes() {
 	MPI_Type_commit(&MPI_Payload);
 	}
 }
+
 
 void computeMandelbrot(bmp_img* img, MandelOpts* opts) {
 	int size;
@@ -158,52 +146,52 @@ void computeMandelbrot(bmp_img* img, MandelOpts* opts) {
 	}
 }
 
-void worker() {
+void worker(void) {
 	MandelOpts opts;
 	MPI_Status status;
 	Payload payload;
 	int targetRow;
 	// Get the first options
-	MPI_Recv(&opts, 1, MPI_Payload, 0, 0, MPI_COMM_WORLD, &status);
+	MPI_Recv(&opts, 1, MPI_MandelOpts, 0, 0, MPI_COMM_WORLD, &status);
 	// Get the first row
 	MPI_Recv(&targetRow, 1, MPI_INT, 0, 0, MPI_COMM_WORLD, &status);
-	do {
+	while ( targetRow != POISON_PILL ) {
 		payload.row = targetRow;
 		computeRow(&opts, &payload);
 		MPI_Send(&payload, 1, MPI_Payload, 0, 0, MPI_COMM_WORLD);
 		MPI_Recv(&targetRow, 1, MPI_INT, 0, 0, MPI_COMM_WORLD, &status);
 		if(targetRow == AWAIT_OPTIONS) {
 			// Get the new options
-			MPI_Recv(&opts, 1, MPI_Payload, 0, 0, MPI_COMM_WORLD, &status);
+			MPI_Recv(&opts, 1, MPI_MandelOpts, 0, 0, MPI_COMM_WORLD, &status);
 			// Get the first job on the new options
 			MPI_Recv(&targetRow, 1, MPI_INT, 0, 0, MPI_COMM_WORLD, &status);
 		}
-	} while ( targetRow != POISON_PILL );
+	}
 }
 
 int main(int argc, char** argv) {
-	/* Setup options for our mandelbot */
-	Compl z;
-	z.re = -2.5;
-	MandelOpts opts;
-	opts.p_width = width;
-	opts.p_height = height;
-	opts.c_width = 4.0;
-	opts.c_height = opts.c_width / width * height;
-	z.im = opts.c_height / 2.0;
-	opts.max_iterations = MAX_ITER;
-	opts.escape_radius = 4.0;
-	opts.startZ = z;
-
 	/* Init MPI */
-	int rank;
 	MPI_Init(&argc, &argv);
 	/* Setup MPI types */
 	setupTypes();
 	/* Get rank */
+	int rank;
 	MPI_Comm_rank(MPI_COMM_WORLD, &rank);
 
 	if (rank == 0) {
+		/* Setup options for our mandelbot */
+		Compl z;
+		z.re = -2.5;
+		MandelOpts opts;
+		opts.p_width = width;
+		opts.p_height = height;
+		opts.c_width = 4.0;
+		opts.c_height = opts.c_width / width * height;
+		z.im = opts.c_height / 2.0;
+		opts.max_iterations = MAX_ITER;
+		opts.escape_radius = 4.0;
+		opts.startZ = z;
+
 		/* Open up the image file */
 		bmp_img img;
 		bmp_img_init_df(&img, width, height);

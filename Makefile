@@ -1,6 +1,6 @@
 CC = mpicc
 LIBS = lib/libbmp.c
-OPTS = -lm -O3
+OPTS = -lm
 
 all: mandelbrot mandelbrot-serial
 
