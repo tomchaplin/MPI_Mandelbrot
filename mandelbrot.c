@@ -8,6 +8,9 @@ int width = 1920;
 int height = 1080;
 char filename[9] = "file1.bmp";
 
+const int AWAIT_OPTIONS = -2;
+const int POISON_PILL = -1;
+
 typedef struct Compl 
 {
 	float re, im;
@@ -30,7 +33,7 @@ typedef struct MandelOpts
 typedef struct Payload
 {
 	int row;
-	Pixel pixel_arr[1920];
+	int iterations_arr[1920];
 } Payload;
 
 int computePoint(Compl c, MandelOpts* opts) {
@@ -62,20 +65,20 @@ void computeRow(MandelOpts* opts, Payload* load) {
 	int pixelIter;
 	Pixel pixel;
 	for(int x = 0; x < opts->p_width; x++) {
-		pixelIter = computePoint(c, opts);
-		colourPixel(pixelIter, opts->max_iterations, &pixel);
-		load->pixel_arr[x] = pixel;
+		load->iterations_arr[x] = computePoint(c, opts);
 		c.re += re_jump;
 	}
 }
 
 void writePayload(bmp_img* img, Payload* payload) {
+	Pixel pixel;
 	for(int x = 0; x < width; x++) {
+		colourPixel(payload->iterations_arr[x], MAX_ITER, &pixel);
 		bmp_pixel_init(
 				&img->img_pixels[payload->row][x], 
-				payload->pixel_arr[x].r,
-				payload->pixel_arr[x].g,
-				payload->pixel_arr[x].b);
+				pixel.r,
+				pixel.g,
+				pixel.b);
 	}
 }
 
@@ -141,11 +144,11 @@ int main(int argc, char** argv) {
 	MPI_Datatype MPI_Payload;
 	{
 	int nblocks = 2;
-	int blocklengths[2] = {1,1920};
-	MPI_Datatype types[3] = {MPI_INT, MPI_Pixel};
+	int blocklengths[2] = {1,width};
+	MPI_Datatype types[3] = {MPI_INT, MPI_INT};
 	MPI_Aint offsets[2];
 	offsets[0] = offsetof(Payload, row);
-	offsets[1] = offsetof(Payload, pixel_arr);
+	offsets[1] = offsetof(Payload, iterations_arr);
 	MPI_Type_create_struct(nblocks, blocklengths, offsets, types, &MPI_Payload);
 	MPI_Type_commit(&MPI_Payload);
 	}
@@ -163,6 +166,10 @@ int main(int argc, char** argv) {
 		int targetThread;
 		MPI_Status status;
 		Payload payload;
+		int workloads[16];
+		for(int i = 0; i<16; i++) {
+			workloads[i] = 0;
+		}
 		/* Do the actual work */
 		for(int currentRow = 0; currentRow < opts.p_height; currentRow++) {
 			if(currentRow  < size - 1) {
@@ -176,11 +183,14 @@ int main(int argc, char** argv) {
 			}
 		}
 		/* Now we have to collect last set of results and tell threads to finish */
-		int currentRow = -1;
+		int message = POISON_PILL;
 		for(int thread = 0; thread < size - 1; thread++) {
 			MPI_Recv(&payload, 1, MPI_Payload, MPI_ANY_SOURCE, 0, MPI_COMM_WORLD, &status);
-			MPI_Send(&currentRow, 1, MPI_INT, status.MPI_SOURCE, 0, MPI_COMM_WORLD);
+			MPI_Send(&message, 1, MPI_INT, status.MPI_SOURCE, 0, MPI_COMM_WORLD);
 			writePayload(&img, &payload);
+		}
+		for(int i = 0; i<16; i++) {
+			printf("%i\n", workloads[i]);
 		}
 		/* Write to file */
 		bmp_img_write(&img, "file1.bmp");
@@ -195,7 +205,13 @@ int main(int argc, char** argv) {
 			computeRow(&opts, &payload);
 			MPI_Send(&payload, 1, MPI_Payload, 0, 0, MPI_COMM_WORLD);
 			MPI_Recv(&targetRow, 1, MPI_INT, 0, 0, MPI_COMM_WORLD, &status);
-		} while ( targetRow != -1 );
+			if(targetRow == AWAIT_OPTIONS) {
+				// Get the new options
+				MPI_Recv(&opts, 1, MPI_Payload, 0, 0, MPI_COMM_WORLD, &status);
+				// Get the first job on the new options
+				MPI_Recv(&targetRow, 1, MPI_INT, 0, 0, MPI_COMM_WORLD, &status);
+			}
+		} while ( targetRow != POISON_PILL );
 	}
 	/* Close MPI */
 	MPI_Finalize();
