@@ -12,7 +12,7 @@ MPI_Datatype MPI_Compl;
 MPI_Datatype MPI_MandelOpts;
 MPI_Datatype MPI_Payload;
 
-int MAX_ITER = 250;
+int MAX_ITER = 1000;
 int width = 1920;
 int height = 1080;
 
@@ -28,6 +28,12 @@ typedef struct Pixel
 {
 	int r, g, b;
 } Pixel;
+
+typedef struct Palette
+{
+	int size;
+	Pixel* swatch;
+} Palette;
 
 typedef struct MandelOpts
 {
@@ -78,6 +84,43 @@ void setupTypes(void) {
 	}
 }
 
+void colourPixel(double hue, Pixel* pixel, Palette* palette) {
+	int colourNumber = floor( hue * ((double)palette->size - 1.0) );
+	pixel->r = palette->swatch[colourNumber].r;
+	pixel->g = palette->swatch[colourNumber].g;
+	pixel->b = palette->swatch[colourNumber].b;
+}
+
+void colourFrame(int* iterationGrid, bmp_img* img, MandelOpts* opts, Palette* palette) {
+	Pixel pixel;
+	int histogram[opts->max_iterations + 1];
+	for(int y = 0; y < opts->p_height; y++) {
+		for(int x = 0; x < opts->p_width; x++) {
+			histogram[ iterationGrid[y*opts->p_width + x] ]++;
+		}
+	}
+	int total = 0;
+	for(int i = 0; i <= opts->max_iterations; i++) {
+		total += histogram[i];
+	}
+	double hueList[opts->max_iterations + 1];	
+	double currentHue = 0;
+	for(int i = 0; i <= opts->max_iterations; i++) {
+		hueList[i] = currentHue;
+		currentHue += (double)histogram[i] / total;
+	}
+	for(int y = 0; y < opts->p_height; y++) {
+		for(int x = 0; x < opts->p_width; x++) {
+			//colourPixel(iterationGrid[y*opts->p_width + x], opts->max_iterations, &pixel);
+			currentHue = hueList[ iterationGrid[y*opts->p_width + x] ];
+			colourPixel(currentHue, &pixel, palette);
+			bmp_pixel_init(
+					&img->img_pixels[y][x], 
+					pixel.r, pixel.g, pixel.b);
+		}
+	}
+}
+
 int computePoint(Compl c, MandelOpts* opts) {
 	int iterations = 0;
 	Compl z;
@@ -92,14 +135,6 @@ int computePoint(Compl c, MandelOpts* opts) {
 	} while ( (z_length < opts->escape_radius) && (iterations < opts->max_iterations) );
 	return iterations;
 }
-
-void colourPixel(int iterations, int max_iterations, Pixel* pixel) {
-	int colour = (int)floor( iterations * 255.0 / max_iterations );
-	pixel->r = colour;
-	pixel->g = colour;
-	pixel->b = colour;
-}
-
 void computeRow(MandelOpts* opts, Payload* load) {
 	Compl c = opts->startZ;
 	c.im = c.im - (load->row - 1) * opts->c_height / (opts->p_height -1);
@@ -110,19 +145,14 @@ void computeRow(MandelOpts* opts, Payload* load) {
 	}
 }
 
-void writePayload(bmp_img* img, Payload* payload, MandelOpts* opts) {
-	Pixel pixel;
+void writePayload(int* iterationGrid, Payload* payload, MandelOpts* opts) {
+	int start_point = payload->row * opts->p_width;
 	for(int x = 0; x < width; x++) {
-		colourPixel(payload->iterations_arr[x], opts->max_iterations, &pixel);
-		bmp_pixel_init(
-				&img->img_pixels[payload->row][x], 
-				pixel.r,
-				pixel.g,
-				pixel.b);
+		iterationGrid[x + start_point] = payload->iterations_arr[x];
 	}
 }
 
-void computeMandelbrot(bmp_img* img, MandelOpts* opts, int message) {
+void computeMandelbrot(int* iterationGrid, MandelOpts* opts, int message) {
 	int size;
 	int targetThread;
 	MPI_Status status;
@@ -138,14 +168,14 @@ void computeMandelbrot(bmp_img* img, MandelOpts* opts, int message) {
 			/* We listen for results and distribute work */
 			MPI_Recv(&payload, 1, MPI_Payload, MPI_ANY_SOURCE, 0, MPI_COMM_WORLD, &status);
 			MPI_Send(&currentRow, 1, MPI_INT, status.MPI_SOURCE, 0, MPI_COMM_WORLD);
-			writePayload(img, &payload, opts);
+			writePayload(iterationGrid, &payload, opts);
 		}
 	}
 	/* Now we have to collect last set of results and tell threads to finish */
 	for(int thread = 0; thread < size - 1; thread++) {
 		MPI_Recv(&payload, 1, MPI_Payload, MPI_ANY_SOURCE, 0, MPI_COMM_WORLD, &status);
 		MPI_Send(&message, 1, MPI_INT, status.MPI_SOURCE, 0, MPI_COMM_WORLD);
-		writePayload(img, &payload, opts);
+		writePayload(iterationGrid, &payload, opts);
 	}
 }
 
@@ -172,6 +202,120 @@ void worker(void) {
 	}
 }
 
+void setupDirectory(char* directory) {
+	time_t rawtime;
+	struct tm * timeinfo;
+	time ( &rawtime );
+	timeinfo = localtime ( &rawtime );
+	sprintf(directory,  "output/%d_%02d_%02d_%02d%02d%02d/",
+			timeinfo->tm_year + 1900,
+			timeinfo->tm_mon + 1,
+			timeinfo->tm_mday,
+			timeinfo->tm_hour,
+			timeinfo->tm_min,
+			timeinfo->tm_sec
+			);
+	struct stat st = {0};
+	if (stat(directory, &st) == -1) {
+			mkdir(directory, 0700);
+	}
+}
+
+double mod1(double x) {
+	while (x >= 1.0) {
+		x--;
+	}
+	while (x < 0.0) {
+		x++;
+	}
+	return x;
+}
+
+double hsl_tests(double x, double tmp_1, double tmp_2) {
+	if(6.0*x < 1.0) {
+		return tmp_2 + (tmp_1 - tmp_2) * 6.0 * x;
+	} else if(2.0*x < 1.0) {
+		return tmp_1;
+	} else if(3.0*x < 2.0) {
+		return tmp_2 + (tmp_1 - tmp_2) * (2.0/3.0 - x) * 6.0;
+	} else {
+		return tmp_2;
+	}
+}
+
+// Accepts HSL
+// Hue in (0,360), saturation in (0,1), lightness in (0,1)
+void HSL_2_RGB(double *hsl, int *rgb) {
+	double hue = hsl[0];
+	double saturation = hsl[1];
+	double luminance = hsl[2];
+
+	if(saturation == 0) {
+		// The colour is grey
+		rgb[0] = (int) luminance * 255.0;
+		rgb[1] = (int) luminance * 255.0;
+		rgb[2] = (int) luminance * 255.0;
+	} else {
+		// We need to calculate some temporary variables
+	double tmp_1, tmp_2;
+	if(luminance < 0.5) {
+		tmp_1 = luminance * (1.0 + saturation);
+	} else {
+		tmp_1 = luminance + saturation - luminance*saturation;
+	}
+		tmp_2 = 2.0*luminance - tmp_1;
+		hue = hue/360.0;
+		rgb[0] = (int) ( hsl_tests ( mod1(hue + (1.0/3.0)), tmp_1, tmp_2 ) * 255 );
+		rgb[1] = (int) ( hsl_tests ( mod1(hue), tmp_1, tmp_2 ) * 255 );
+		rgb[2] = (int) ( hsl_tests ( mod1(hue - (1.0/3.0)), tmp_1, tmp_2 ) * 255 );
+	}
+}
+
+
+void getPaletteOne(Palette* palette) {
+	int rgb[3];
+	double hsl[3];
+	hsl[0] = 287.0;
+	hsl[1] = 1.0;
+	for(int i = 0; i <= 17; i++) {
+		hsl[2] = (double) i / 100.0;
+		HSL_2_RGB(hsl, rgb);
+		palette->swatch[i].r = rgb[0];
+		palette->swatch[i].g = rgb[1];
+		palette->swatch[i].b = rgb[2];
+	}
+
+	for(int i=18; i<=70; i++) {
+		hsl[0]++;
+		hsl[2] = hsl[2] + (0.19 / 53.0);
+		HSL_2_RGB(hsl, rgb);
+		palette->swatch[i].r = rgb[0];
+		palette->swatch[i].g = rgb[1];
+		palette->swatch[i].b = rgb[2];
+	}
+
+	for(int i=71; i<=90; i++) {
+		hsl[0]++;
+		hsl[2] = hsl[2] + (0.19 / 64.0);
+		HSL_2_RGB(hsl, rgb);
+		palette->swatch[i].r = rgb[0];
+		palette->swatch[i].g = rgb[1];
+		palette->swatch[i].b = rgb[2];
+	}
+
+	hsl[0] = 0.0;
+
+	for(int i=91; i<=134; i++) {
+		hsl[0]++;
+		hsl[2] = hsl[2] + (0.19 / 64.0);
+		HSL_2_RGB(hsl, rgb);
+		palette->swatch[i].r = rgb[0];
+		palette->swatch[i].g = rgb[1];
+		palette->swatch[i].b = rgb[2];
+	}
+
+}
+
 int main(int argc, char** argv) {
 	/* Init MPI */
 	MPI_Init(&argc, &argv);
@@ -190,29 +334,21 @@ int main(int argc, char** argv) {
 		opts.c_width = 1.0;
 		opts.escape_radius = 4.0;
 		Compl centerZ;
-		centerZ.re = -1.2310203138415972;
-		centerZ.im = 0.1679294826373479;
+		centerZ.re = -0.8332313247446712;
+		centerZ.im = 0.20542799512012438;
 		double zoom_factor = 1.05;
-		int frames = 100;
+		int frames = 600;
+
+		/* Setup palette */
+		Palette palette;
+		Pixel palette_swatch[135];
+		palette.swatch = palette_swatch;
+		palette.size = 135;
+		getPaletteOne(&palette);
 
 		/* Setup directory */
-		time_t rawtime;
-		struct tm * timeinfo;
-		time ( &rawtime );
-		timeinfo = localtime ( &rawtime );
 		char directory[128];
-		sprintf(directory,  "output/%d_%02d_%02d_%02d%02d%02d/",
-				timeinfo->tm_year + 1900,
-				timeinfo->tm_mon + 1,
-				timeinfo->tm_mday,
-				timeinfo->tm_hour,
-				timeinfo->tm_min,
-				timeinfo->tm_sec
-				);
-		struct stat st = {0};
-		if (stat(directory, &st) == -1) {
-			    mkdir(directory, 0700);
-		}
+		setupDirectory(directory);
 
 		/* Open up the image file */
 		bmp_img img;
@@ -230,7 +366,9 @@ int main(int argc, char** argv) {
 			if(currentFrame == frames -1) {
 				message = POISON_PILL;
 			};
-			computeMandelbrot(&img, &opts, message);
+			int iterationGrid[width * height];
+			computeMandelbrot(iterationGrid, &opts, message);
+			colourFrame(iterationGrid, &img, &opts, &palette);
 			// Figure out the filename
 			sprintf(filename, "%sfile%04d.bmp", directory, currentFrame);
 			/* Write to file */
